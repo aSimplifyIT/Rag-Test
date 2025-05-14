@@ -12,6 +12,7 @@ from common.Requests.conversation_request import ConversationRequest
 from common.Requests.user_create import UserCreate
 from common.Requests.user_login import UserLogin
 from common.Requests.recent_query_request import RecentQueryRequest
+from common.Requests.text_request import TextRequest
 from common.enums import MessageRole
 from webapi.web_base import WebBase
 from webapi.security import authorize
@@ -74,13 +75,14 @@ async def upload_file(file: UploadFile = File(...)):
             vector_db_service.create_pinecone_index()
 
         pinecone_index = vector_db_service.get_index(os.getenv("PINECONE_INDEX_NAME"))
-        print("Fetch index from pinecone: ", pinecone_index)
 
         embedding_model = model_service.get_embedding_model()
         vectors = vector_db_service.create_vectors(text_in_chunks, embedding_model)
-        vector_db_service.add_vectors(vectors, pinecone_index)
 
-        # os.remove(file.filename)
+        unique_nanespace_id = vector_db_service.add_file_in_excel(file.filename)
+        vector_db_service.add_vectors(vectors, pinecone_index, unique_nanespace_id)
+
+        os.remove(file.filename)
 
         return web_base.generate_result_response(result={"File added successfuly"})
     
@@ -90,16 +92,15 @@ async def upload_file(file: UploadFile = File(...)):
 @app.get("/files")
 async def get_files():
     try:
-        folder_path = "E:\\Ahsan\\Rag-Test"
-        file_names = os.listdir(folder_path)
-        file_names = [f for f in file_names if os.path.isfile(os.path.join(folder_path, f))]
-
+        df = vector_db_service.get_files_from_excel()
         files = []
-        for f in file_names:
-            name, ext = os.path.splitext(f)
-            ext = ext.lstrip('.')  # Remove dot from extension
-            if ext=="pdf" or ext=="txt" or ext=="docs":
-                files.append({"name": name, "extension": ext})
+        if not df.empty:
+            for _, row in df.iterrows():
+                if row.get("File Name", "") != "appended_text":
+                    files.append({
+                        "name": row.get("File Name", ""),
+                        "extension": row.get("File Extension", "")
+                    })
 
         return web_base.generate_result_response(result={"files": files})
 
@@ -142,6 +143,7 @@ async def conversation(request: ConversationRequest):
         previous_conversation = []
         if request.chat_history:
             previous_conversation = [msg.dict() for msg in request.chat_history]
+            previous_conversation = [{**item, 'content': f'{{"message":"{item["content"]}"}}' if item['role'] == 'assistant' else item['content']} for item in previous_conversation]
             previous_conversation.insert(0, {"role": MessageRole.SYSTEM.name.lower(), "content": system_prompt})
             previous_conversation.append({"role": MessageRole.USER.name.lower(), "content": user_query})
         if not request.chat_history:
@@ -254,6 +256,86 @@ async def user_login(user_login_request: UserLogin):
     except Exception as e:
         return web_base.generate_error_response(errors=[str(e)], status_code=500)
 
+@app.delete("/file")
+async def delete_file(file_name: str):
+    try:
+        namespace_id = vector_db_service.get_record_by_file_name(file_name)
+        vector_db_service.delete_vectors_by_namespace_id(namespace_id)
+        vector_db_service.delete_record_by_file_name(file_name)
+
+        return web_base.generate_result_response(result={f"file {file_name} delete successfully"})
+    
+    except Exception as e:
+        return web_base.generate_error_response(errors=[str(e)], status_code=500)
+
+@app.post("/text")
+async def add_text(test_request: TextRequest):
+    try:
+        file_path = "appended_text.txt"
+        
+        if os.path.exists(file_path):
+            name, ext = os.path.splitext(file_path)
+            namespace_id = vector_db_service.get_record_by_file_name(name)
+            if namespace_id != None:
+                vector_db_service.delete_vectors_by_namespace_id(namespace_id)
+                vector_db_service.delete_record_by_file_name(name)
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(test_request.text + '\n')
+
+        text_in_chunks = vector_db_service.text_splitter(test_request.text)
+
+        pinecone_indexes = vector_db_service.get_indexes()
+        if os.getenv("PINECONE_INDEX_NAME") not in pinecone_indexes.names():
+            vector_db_service.create_pinecone_index()
+
+        pinecone_index = vector_db_service.get_index(os.getenv("PINECONE_INDEX_NAME"))
+
+        embedding_model = model_service.get_embedding_model()
+        vectors = vector_db_service.create_vectors(text_in_chunks, embedding_model)
+
+        unique_nanespace_id = vector_db_service.add_file_in_excel(file_path)
+        vector_db_service.add_vectors(vectors, pinecone_index, unique_nanespace_id)
+
+        return web_base.generate_result_response(result={"Text added successfully"})
+    
+    except Exception as e:
+        return web_base.generate_error_response(errors=[str(e)], status_code=500)
+
+@app.get("/text")
+async def read_text():
+    try:
+        file_path = "appended_text.txt"
+        if os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            return web_base.generate_result_response(result={"text": content})
+        else:
+            return web_base.generate_result_response(result={"text": ""})
+        
+    except Exception as e:
+        return web_base.generate_error_response(errors=[str(e)], status_code=500)
+    
+@app.delete("/text")
+async def delete_file():
+    try:
+        file_path = "appended_text.txt"
+        if os.path.exists(file_path):
+            name, ext = os.path.splitext(file_path)
+            namespace_id = vector_db_service.get_record_by_file_name(name)
+            vector_db_service.delete_vectors_by_namespace_id(namespace_id)
+            vector_db_service.delete_record_by_file_name(name)
+
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write("")
+            return web_base.generate_result_response(result={"Text empty"})
+        else:
+            return web_base.generate_result_response(result={"Text empty"})
+        
+    except Exception as e:
+        return web_base.generate_error_response(errors=[str(e)], status_code=500)
+    
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="127.0.0.1", port=port)
