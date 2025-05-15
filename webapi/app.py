@@ -113,7 +113,8 @@ async def openai_stream(previous_conversation):
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=previous_conversation,
-            stream=True
+            stream=True,
+            response_format={"type": "json_object"}
         )
 
         print("Response completed")
